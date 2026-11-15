@@ -1,0 +1,56 @@
+# lumbridge-fleet config: what each machine row in the lumbridge-tui sidebar shows.
+# Install: cp to ~/.config/lumbridge-tui/fleet.toml. Keys under [machines] are lumbridge-tui
+# machine labels exactly as the sidebar shows them (`lumbridge-tui machine list`).
+# Check output with: lumbridge-fleet --pretty
+#
+# This is an example. The machines, services and addresses below are made up:
+# replace them with your own.
+
+prometheus = "http://127.0.0.1:9090"     # your Prometheus
+alertmanager = "http://127.0.0.1:9093"   # optional; leave out for no alert counts
+
+# A value at or above its threshold gets a trailing "!" (coloured red by the
+# `contains = "!"` rules in config.toml).
+[thresholds]
+load = 1.5    # 1-minute load per core
+mem = 85      # % used
+disk = 85     # % of / used
+
+# node     = Prometheus `instance` label for node-exporter metrics and units
+# alerts   = substrings of an alert's `instance` label that belong to this
+#            machine (default: [node])
+# services = dots, in order. unit = systemd unit on `node`; probe = substring
+#            of a blackbox target; expr = PromQL, up when every series > 0.
+
+[machines.Local]          # the machine lumbridge-tui runs on. Services that run as
+node = "desk"             # user units are invisible to node-exporter, so use probes.
+services = [
+  { name = "web",  probe = "http://desk.example:8080/" },
+  { name = "docs", probe = "https://docs.example.com/" },
+]
+
+[machines.build]
+node = "build"
+services = [
+  { name = "ci runner", unit = "ci-runner.service" },
+  { name = "postgres",  unit = "postgresql.service" },
+]
+
+[machines.gpu]
+node = "gpu"
+services = [
+  { name = "llm",   expr = 'up{job="vllm",model="chat"}' },
+  { name = "embed", expr = 'up{job="vllm",model="embed"}' },
+]
+
+# A machine without node-exporter gets no values; it can still show its alerts.
+[machines.nas]
+alerts = ["nas"]
+
+[machines.web]
+node = "web-1"
+alerts = ["web-1", "web.example.com"]
+services = [
+  { name = "site", probe = "https://www.example.com/" },
+  { name = "api",  probe = "https://api.example.com/health" },
+]

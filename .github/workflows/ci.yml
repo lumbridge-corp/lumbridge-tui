@@ -1,0 +1,41 @@
+# Scrub check, format, clippy, the whole test suite (scripts/ci.sh) on a GitHub-hosted runner.
+# No secrets are needed. Actions are pinned to a commit.
+name: CI
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      NEXTEST_VERSION: 0.9.148
+      ZIG_VERSION: 0.16.0
+      ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Scrub check
+        run: scripts/scrub-check
+      - name: Rust (the release in rust-toolchain.toml)
+        run: |
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --component rustfmt,clippy
+          cargo install --locked "cargo-nextest@$NEXTEST_VERSION"
+      - name: Zig
+        run: |
+          curl -fsSLO "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
+          echo "$ZIG_SHA256  zig-x86_64-linux-$ZIG_VERSION.tar.xz" | sha256sum -c -
+          tar -xf "zig-x86_64-linux-$ZIG_VERSION.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-x86_64-linux-$ZIG_VERSION" >> "$GITHUB_PATH"
+      - name: Checks (scripts/ci.sh)
+        run: scripts/ci.sh

@@ -1,0 +1,3 @@
+[submodule "crates/lumbridge-notes"]
+	path = crates/lumbridge-notes
+	url = https://github.com/lumbridge-corp/lumbridge-notes

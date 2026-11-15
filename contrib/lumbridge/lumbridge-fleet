@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""lumbridge-fleet: machine feeder for lumbridge-tui's [ui.sidebar.machines].
+
+Reads fleet.toml (default ~/.config/lumbridge-tui/fleet.toml), asks your
+Prometheus (and Alertmanager, when set) about each machine, and prints the JSON
+document lumbridge-tui's machine feeder expects:
+
+  {"machines": {"<lumbridge-tui label>": {"tokens": {...}, "services": [...]}}}
+
+Tokens per machine (absent when there is no data, so the sidebar drops them):
+  load   1-minute load divided by core count, e.g. "0.2"
+  mem    memory used, e.g. "27%"
+  disk   root filesystem used, e.g. "78%"
+  alerts active Alertmanager alerts for the machine, e.g. "2!" (critical) or "1"
+A value crosses its threshold in fleet.toml -> it gets a trailing "!" so the
+sidebar can colour it with a `contains = "!"` rule.
+
+For the detail drawer each machine also gets `series` (the last hour of
+load/mem/disk, 2-minute steps, oldest first) and `alerts` (name, severity,
+summary of each active alert).
+
+Services come from the machine's `services` list; each is one of
+  unit  = "ci-runner.service"          systemd unit active on the node
+  probe = "https://www.example.com/"   blackbox probe_success for that target
+  expr  = 'up{job="vllm"}'             any PromQL; up when every series > 0
+
+Stdlib only. Never raises: on a failed query the affected tokens are omitted,
+and lumbridge-tui drops the machine's values after three failed runs in a row.
+Run `lumbridge-fleet --pretty` to see what the sidebar will get, or
+`lumbridge-fleet --table` for a readable summary (the Home drawer's Fleet tile).
+"""
+
+import json
+import os
+import sys
+import time
+import tomllib
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
+DEFAULT_CONFIG = os.path.expanduser("~/.config/lumbridge-tui/fleet.toml")
+TIMEOUT = 4
+
+
+def get_json(url):
+    with urllib.request.urlopen(url, timeout=TIMEOUT) as response:
+        return json.load(response)
+
+
+def promql(base, query):
+    """Return {instance-or-label-tuple: value} for an instant query, or None."""
+    url = f"{base}/api/v1/query?" + urllib.parse.urlencode({"query": query})
+    try:
+        body = get_json(url)
+    except Exception as error:  # noqa: BLE001 - feeder must never crash
+        print(f"lumbridge-fleet: query failed: {query}: {error}", file=sys.stderr)
+        return None
+    if body.get("status") != "success":
+        return None
+    return body["data"]["result"]
+
+
+def promql_range(base, query, seconds=3600, step=120):
+    """Return {instance: [values oldest first]} for a range query, or None."""
+    end = time.time()
+    params = {"query": query, "start": end - seconds, "end": end, "step": step}
+    url = f"{base}/api/v1/query_range?" + urllib.parse.urlencode(params)
+    try:
+        body = get_json(url)
+    except Exception as error:  # noqa: BLE001 - feeder must never crash
+        print(f"lumbridge-fleet: range query failed: {query}: {error}", file=sys.stderr)
+        return None
+    if body.get("status") != "success":
+        return None
+    out = {}
+    for series in body["data"]["result"]:
+        try:
+            values = [round(float(value), 2) for _, value in series["values"]]
+        except (KeyError, ValueError, TypeError):
+            continue
+        out[series["metric"].get("instance", "")] = values
+    return out
+
+
+def by_instance(results):
+    out = {}
+    for series in results or []:
+        try:
+            out[series["metric"].get("instance", "")] = float(series["value"][1])
+        except (KeyError, ValueError, IndexError):
+            continue
+    return out
+
+
+def mark(text, value, threshold):
+    return f"{text}!" if threshold is not None and value >= threshold else text
+
+
+def main():
+    pretty = "--pretty" in sys.argv
+    table = "--table" in sys.argv
+    args = [arg for arg in sys.argv[1:] if arg not in ("--pretty", "--table")]
+    path = args[0] if args else os.environ.get("LUMBRIDGE_TUI_FLEET_CONFIG", DEFAULT_CONFIG)
+    with open(path, "rb") as handle:
+        config = tomllib.load(handle)
+
+    prom = config["prometheus"].rstrip("/")
+    alertmanager = config.get("alertmanager", "").rstrip("/")
+    thresholds = config.get("thresholds", {})
+    machines = config.get("machines", {})
+
+    units = sorted(
+        {
+            service["unit"]
+            for machine in machines.values()
+            for service in machine.get("services", [])
+            if "unit" in service
+        }
+    )
+    exprs = sorted(
+        {
+            service["expr"]
+            for machine in machines.values()
+            for service in machine.get("services", [])
+            if "expr" in service
+        }
+    )
+
+    queries = {
+        "load": 'node_load1 / count without(cpu, mode)(node_cpu_seconds_total{mode="idle"})',
+        "mem": "100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)",
+        "disk": '100 * (1 - node_filesystem_avail_bytes{mountpoint="/"}'
+        ' / node_filesystem_size_bytes{mountpoint="/"})',
+        "probe": "probe_success",
+    }
+    if units:
+        pattern = "|".join(unit.replace(".", "\\\\.") for unit in units)
+        queries["units"] = f'node_systemd_unit_state{{state="active",name=~"{pattern}"}}'
+    for index, expr in enumerate(exprs):
+        queries[f"expr{index}"] = expr
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        futures = {name: pool.submit(promql, prom, query) for name, query in queries.items()}
+        range_futures = {
+            name: pool.submit(promql_range, prom, queries[name]) for name in ("load", "mem", "disk")
+        }
+        alerts_future = (
+            pool.submit(get_json, f"{alertmanager}/api/v2/alerts?active=true&silenced=false&inhibited=false")
+            if alertmanager
+            else None
+        )
+        results = {name: future.result() for name, future in futures.items()}
+        history = {name: future.result() or {} for name, future in range_futures.items()}
+        try:
+            alerts = alerts_future.result() if alerts_future else None
+        except Exception as error:  # noqa: BLE001
+            print(f"lumbridge-fleet: alertmanager failed: {error}", file=sys.stderr)
+            alerts = None
+
+    load = by_instance(results["load"])
+    mem = by_instance(results["mem"])
+    disk = by_instance(results["disk"])
+    probes = by_instance(results["probe"])
+    unit_state = {}
+    for series in results.get("units") or []:
+        metric = series["metric"]
+        unit_state[(metric.get("instance"), metric.get("name"))] = float(series["value"][1]) > 0
+    expr_state = {}
+    for index, expr in enumerate(exprs):
+        series = results.get(f"expr{index}")
+        expr_state[expr] = None if not series else all(float(s["value"][1]) > 0 for s in series)
+
+    feed = {}
+    for label, machine in machines.items():
+        node = machine.get("node")
+        tokens = {}
+        if node in load:
+            tokens["load"] = mark(f"{load[node]:.1f}", load[node], thresholds.get("load"))
+        if node in mem:
+            tokens["mem"] = mark(f"{mem[node]:.0f}%", mem[node], thresholds.get("mem"))
+        if node in disk:
+            tokens["disk"] = mark(f"{disk[node]:.0f}%", disk[node], thresholds.get("disk"))
+
+        series = {name: history[name][node] for name in history if node in history[name]}
+
+        alert_list = []
+        if alerts is not None:
+            matches = machine.get("alerts", [node] if node else [])
+            critical = warning = 0
+            for alert in alerts:
+                labels = alert.get("labels", {})
+                if labels.get("alertname") == "Watchdog":
+                    continue
+                instance = labels.get("instance", "")
+                if not any(match and match in instance for match in matches):
+                    continue
+                if labels.get("severity") == "critical":
+                    critical += 1
+                else:
+                    warning += 1
+                annotations = alert.get("annotations", {})
+                alert_list.append(
+                    {
+                        "name": labels.get("alertname", ""),
+                        "severity": labels.get("severity", ""),
+                        "summary": annotations.get("summary")
+                        or annotations.get("description")
+                        or labels.get("job", ""),
+                    }
+                )
+            if critical:
+                tokens["alerts"] = f"{critical + warning}!"
+            elif warning:
+                tokens["alerts"] = str(warning)
+
+        services = []
+        for service in machine.get("services", []):
+            if "unit" in service:
+                if results.get("units") is None:
+                    state = "unknown"
+                else:
+                    state = "up" if unit_state.get((node, service["unit"])) else "down"
+            elif "probe" in service:
+                hits = [value for target, value in probes.items() if service["probe"] in target]
+                state = "unknown" if not hits else ("up" if all(hits) else "down")
+            elif "expr" in service:
+                up = expr_state.get(service["expr"])
+                state = "unknown" if up is None else ("up" if up else "down")
+            else:
+                state = "unknown"
+            services.append({"name": service.get("name", ""), "state": state})
+
+        alert_list.sort(key=lambda alert: (alert["severity"] != "critical", alert["name"]))
+        feed[label] = {
+            "tokens": tokens,
+            "services": services,
+            "series": series,
+            "alerts": alert_list,
+        }
+
+    if table:
+        print_table(feed)
+        return
+    json.dump({"machines": feed}, sys.stdout, indent=2 if pretty else None)
+    sys.stdout.write("\n")
+
+
+def print_table(feed):
+    """A readable summary of the feed: one row per machine, then what is wrong."""
+    colour = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+    def paint(text, code):
+        return f"\x1b[{code}m{text}\x1b[0m" if colour else text
+
+    def cell(value, width):
+        padded = f"{value:<{width}}"
+        return paint(padded, "31") if value.endswith("!") else padded
+
+    names = list(feed)
+    width = max([len("MACHINE")] + [len(name) for name in names]) + 2
+    print(paint(f"{'MACHINE':<{width}}{'LOAD':<7}{'MEM':<7}{'DISK':<7}{'ALERTS':<8}SERVICES", "1"))
+    problems = []
+    for name in names:
+        entry = feed[name]
+        tokens = entry["tokens"]
+        services = entry["services"]
+        up = sum(1 for service in services if service["state"] == "up")
+        down = [service["name"] for service in services if service["state"] == "down"]
+        unknown = [service["name"] for service in services if service["state"] == "unknown"]
+        summary = f"{up}/{len(services)} up" if services else "-"
+        if down:
+            summary = paint(summary, "31")
+        print(
+            f"{name:<{width}}"
+            + cell(tokens.get("load", "-"), 7)
+            + cell(tokens.get("mem", "-"), 7)
+            + cell(tokens.get("disk", "-"), 7)
+            + cell(tokens.get("alerts", "-"), 8)
+            + summary
+        )
+        for service in down:
+            problems.append(f"{name}: {service} is down")
+        for service in unknown:
+            problems.append(f"{name}: {service} has no data")
+        for alert in entry["alerts"]:
+            problems.append(f"{name}: [{alert['severity'] or 'alert'}] {alert['name']}: {alert['summary']}")
+    if problems:
+        print()
+        for line in problems:
+            print(f"  {paint('•', '33')} {line}")
+
+
+if __name__ == "__main__":
+    main()

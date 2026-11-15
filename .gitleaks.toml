@@ -1,0 +1,17 @@
+# gitleaks settings: its default rules, minus lines a person has checked.
+# Each line below only looks like a key: a test value, a variable name, a setting.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Checked by hand: not secrets"
+regexTarget = "line"
+regexes = [
+  # a fixed test number in src/platform/windows/notifications.rs
+  '''let token = 0x0123456789abcdef_fedcba9876543210u128;''',
+  # third-party release workflows write a secret from the CI environment; no value is in the file
+  '''echo "\$APPLE_NOTARIZATION_KEY" > notarization_key\.p8''',
+  # third-party code: a keybinding example and a struct field
+  '''keybind = chain=close_surface''',
+  '''result\.flags\.modify_other_keys_2 = header\.modify_other_keys_2;''',
+]

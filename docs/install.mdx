@@ -1,0 +1,64 @@
+---
+title: Install Lumbridge TUI
+description: Build, install, update and verify Lumbridge TUI from source.
+---
+
+Lumbridge TUI has no release downloads, installers or updater. Build it from
+source on Linux or macOS (Windows builds work too, see
+[Windows support](windows-beta.mdx)).
+
+## Build
+
+Requirements: Rust (the version pinned in `rust-toolchain.toml`, rustup fetches
+it), Zig 0.16 for the vendored libghostty-vt, git.
+
+```bash
+git clone --recurse-submodules https://github.com/lumbridge-corp/lumbridge-tui.git
+cd lumbridge-tui
+cargo build --release
+```
+
+In a checkout made without `--recurse-submodules`, run
+`git submodule update --init` first: the notes editor (`crates/lumbridge-notes`)
+is a submodule and a workspace member. Set `ZIG=/path/to/zig` when Zig 0.16 is
+not the `zig` on `PATH`.
+
+Install the binary wherever you keep your own tools, for example:
+
+```bash
+install -m 755 target/release/lumbridge-tui ~/.local/bin/
+cargo install --path crates/lumbridge-notes   # the notes editor, optional
+```
+
+## Install with Nix
+
+The repository has a flake. Include the submodule:
+
+```bash
+nix build '.?submodules=1'
+nix develop
+```
+
+## Verify
+
+```bash
+lumbridge-tui --version
+lumbridge-tui
+```
+
+## Update
+
+Pull and rebuild:
+
+```bash
+git pull --recurse-submodules
+cargo build --release
+```
+
+`lumbridge-tui update` only prints these instructions. Running servers keep
+their pane processes; start `lumbridge-tui` again to reconnect with the new
+client. A new server-side action stays unavailable until that server is
+restarted (`lumbridge-tui server stop`, or `lumbridge-tui session stop <name>`).
+Saved SSH machines run their own Lumbridge TUI; rebuild it there, or let remote
+attach copy your local binary when the platforms match (see
+[remote attach](persistence-remote.mdx#remote-attach-over-ssh)).

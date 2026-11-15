@@ -1,0 +1,25 @@
+# Accepted hits of scripts/scrub-check. One entry per line: <path glob>:<regex>
+# The matching text is cut from lines of matching files before the check, so
+# an entry allows exactly that text and nothing else on the line.
+# Every entry has its reason above it. Keep the list short.
+
+# Third-party code under vendor/ stays exactly as its authors wrote it: their
+# addresses, their CI files and test paths, example addresses in their docs.
+vendor/*:[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[a-z]{2,}\b
+vendor/libghostty-vt/*:/Users/[A-Za-z][A-Za-z0-9._-]*
+vendor/libghostty-vt/*:/home/[a-z_][a-z0-9_-]*
+vendor/libghostty-vt/*:\b(10\.[0-9]{1,3}|192\.168)\.[0-9]{1,3}\.[0-9]{1,3}\b
+
+# Made-up users, paths and values in unit tests and help text.
+src/*.rs:/home/(a b|o'brien|linuxbrew|remote|u)\b
+tests/machine_setup.rs:/home/remote\b
+src/client/shell/overlays.rs:←→/home/end
+src/detect/mod.rs:/Users/(username|REDACTED|has)\b
+tests/fixtures/hermes-installer-process-info-*.json:/Users/(username|REDACTED)\b
+src/*:C:[\\/]Users[\\/](user|User|lumbridge-tui|A B|A'B|test|O'Neil|O''Neil|reporter)\b
+src/cli/plugin.rs:git@github\.com
+src/client/endpoint/catalog.rs:"password": "must-not-be-accepted"
+tests/cli/panes.rs:token = "WRAP_WAIT_TEST_[A-Z0-9_]+"
+
+# README credits the project Lumbridge started from.
+README.md:\[Herdr\]\(https://github\.com/herdrdev/herdr[a-z-]*\)
